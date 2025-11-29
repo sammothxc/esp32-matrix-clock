@@ -4,15 +4,24 @@
 #include <ElegantOTA.h>
 #include <ESPAsyncWebServer.h>
 #include <ESPmDNS.h>
+#include <MD_Parola.h>
+#include <MD_MAX72xx.h>
+#include <SPI.h>
 #include <time.h>
 #include <WiFi.h>
 
 #define TZ -7 // Mountain Time Zone (UTC-7)
 
-#define DIGIT_COUNT 4
+// pins
+#define MAX_DEVICES 4
+#define DIN_PIN 13
+#define CS_PIN   12
+#define CLK_PIN 11
+#define LED_PIN 48
+
+#define HARDWARE_TYPE MD_MAX72XX::FC16_HW
 #define EEPROM_SIZE 1024
 #define EEPROM_MAGIC 0xA55A1234
-#define REFRESH 2200 // microseconds per digit. ~2.2 ms per digit is ~450 Hz refresh for 4 digits
 
 struct EEPROMstorage {
     uint32_t magic;
@@ -24,8 +33,6 @@ struct EEPROMstorage {
     uint8_t colonBlinkSlow;
 };
 
-uint8_t displayDigits[DIGIT_COUNT];
-const uint8_t led = 48;
 const long gmtOffset_sec = TZ * 3600; // MST
 const int daylightOffset_sec = 3600; // MDT
 const char* ntpServer1 = "pool.ntp.org";
@@ -47,6 +54,7 @@ IPAddress AP_IP(10,1,1,1);
 IPAddress AP_subnet(255,255,255,0);
 AsyncWebServer server(80);
 EEPROMstorage config;
+MD_Parola matrix = MD_Parola(HARDWARE_TYPE, DIN_PIN, CLK_PIN,CS_PIN, MAX_DEVICES);
 
 // bits 0..6 = a..g
 const uint8_t digits[10] = {
@@ -60,7 +68,6 @@ void setUpAccessPoint();
 void handleWebServerRequest(AsyncWebServerRequest *request);
 void startMDNS();
 void setUpWebServer();
-void wifiBlocker();
 void requestReboot();
 void rebootCheck();
 void NTPsync();
@@ -71,9 +78,11 @@ void display();
 void setup() {
     Serial.begin(115200);
     Serial.println("Starting up...");
-    pinMode(led, OUTPUT);
-    digitalWrite(led, HIGH);
-
+    pinMode(LED_PIN, OUTPUT);
+    digitalWrite(LED_PIN, HIGH);
+    matrix.begin();
+    matrix.setIntensity(8);
+    matrix.displayClear();
     EEPROM.begin(EEPROM_SIZE);
     readConf();
     if (!connectToWiFi()){ setUpAccessPoint(); }
@@ -81,11 +90,31 @@ void setup() {
     setUpWebServer();
     configTime(gmtOffset_sec, daylightOffset_sec, ntpServer1, ntpServer2);
     NTPsync();
-    digitalWrite(led, LOW);
-    wifiBlocker();
+    digitalWrite(LED_PIN, LOW);
 }
 
 void loop() {
+    matrix.setTextAlignment(PA_LEFT);
+    matrix.print("Left");
+    delay(2000);
+
+    matrix.setTextAlignment(PA_CENTER);
+    matrix.print("Center");
+    delay(2000);
+
+    matrix.setTextAlignment(PA_RIGHT);
+    matrix.print("Right");
+    delay(2000);
+
+    matrix.setTextAlignment(PA_CENTER);
+    matrix.setInvert(true);
+    matrix.print("Invert");
+    delay(2000);
+
+    matrix.setInvert(false);
+    matrix.print(1234);
+    delay(2000);
+
     rebootCheck();
     NTPsync();
     updateTime();
@@ -251,13 +280,13 @@ void setUpWebServer() {
         if (millis() - otaProgressMillis > 1000) {
             otaProgressMillis = millis();
             Serial.printf("Progress: %u%%\n", (current * 100) / final);
-            digitalWrite(led, !digitalRead(led));
+            digitalWrite(LED_PIN, !digitalRead(LED_PIN));
         }
         Serial.printf("Progress: %u%%\n", (current * 100) / final);
     });
     ElegantOTA.onEnd([](bool success) {
         otaInProgress = false;
-        digitalWrite(led, LOW);
+        digitalWrite(LED_PIN, LOW);
         if (success) {
             Serial.println("OTA update completed successfully! Restarting...");
             delay(500);
@@ -270,13 +299,6 @@ void setUpWebServer() {
     Serial.println("ElegantOTA server started");
     server.begin();
     Serial.println("Web server started");
-}
-
-void wifiBlocker() {
-    while(!wifiConnected) {
-        delay(300);
-        digitalWrite(led, !digitalRead(led));
-    }
 }
 
 void requestReboot() {
@@ -335,6 +357,10 @@ void updateTime() {
 }
 
 void updateColon() {
+    if (!config.colonBlinkEnabled) {
+        colonOn = true;
+        return;
+    }
     if (millis() - lastColonChange >= (config.colonBlinkSlow ? 1000 : 500)) {
         colonOn = !colonOn;
         lastColonChange = millis();
